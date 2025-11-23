@@ -1,9 +1,3 @@
-/*// city_full.cpp
-// Semi-realistic city scene using classic OpenGL + freeglut
-// Features: buildings with windows/doors, road, cars, sidewalks, walking humans, trees, grass,
-// sun + rays, mouse camera rotation & wheel zoom, animation.
-// Compile: g++ -o city_full city_full.cpp -lGL -lGLU -lglut
-
 #include <GL/gl.h>
 #include <GL/glu.h>
 #include <GL/glut.h>
@@ -11,627 +5,7 @@
 #include <vector>
 #include <cmath>
 #include <cstdlib>
-
-// -------------------------- Global scene & camera params --------------------------
-float camAngleY = 0.0f;    // yaw (left-right)
-float camAngleX = -18.0f;  // pitch (up-down)
-float camDist   = 28.0f;   // distance (zoom)
-
-int lastMouseX = 0, lastMouseY = 0;
-bool dragging = false;
-
-int windowWidth = 1000, windowHeight = 700;
-
-// Sun parameters
-float sunAngle = 45.0f;     // degrees; controls sun position
-const float SUN_RADIUS = 40.0f;
-
-// Timer
-const int TIMER_MS = 16;    // ~60 fps
-
-// -------------------------- Scene objects --------------------------
-struct Car {
-    float laneX;   // x position (lane center)
-    float z;       // z position
-    float speed;   // speed units per frame
-    float r,g,b;   // color
-};
-std::vector<Car> cars;
-
-struct Human {
-    float x, z;       // current position
-    float dir;        // direction along sidewalk (+1 or -1)
-    float speed;      // movement speed
-    float phase;      // for simple arm/leg swing animation
-};
-std::vector<Human> humans;
-
-// Buildings layout
-struct Building {
-    float x, z;   // center
-    float w, d;   // width (x) and depth (z)
-    float h;      // height
-};
-std::vector<Building> buildings;
-
-// -------------------------- Utility helpers --------------------------
-void setMaterialRGB(float r, float g, float b, float shininess = 20.0f) {
-    GLfloat amb[] = { r*0.2f, g*0.2f, b*0.2f, 1.0f };
-    GLfloat dif[] = { r, g, b, 1.0f };
-    GLfloat spec[] = { 0.2f, 0.2f, 0.2f, 1.0f };
-    glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, amb);
-    glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, dif);
-    glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, spec);
-    glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, shininess);
-}
-
-// Simple box (centered) helper using glutSolidCube scaled
-void drawBox(float cx, float cy, float cz, float sx, float sy, float sz) {
-    glPushMatrix();
-    glTranslatef(cx, cy, cz);
-    glScalef(sx, sy, sz);
-    glutSolidCube(1.0f);
-    glPopMatrix();
-}
-
-// -------------------------- Scene building/initialization --------------------------
-void setupBuildings() {
-    buildings.clear();
-    // create a row of buildings on left and right with gaps for sun rays
-    // left side (x negative)
-    for (int i = 0; i < 6; ++i) {
-        float z = -50.0f + i * 20.0f;
-        if (i==2) z += 3.0f; // slight irregularity
-        float h = 6.0f + (i % 4) * 2.5f; // variety in heights
-        buildings.push_back({ -9.0f, z, 6.0f, 8.0f, h }); // left column
-    }
-    // right side (x positive)
-    for (int i = 0; i < 6; ++i) {
-        float z = -50.0f + i * 20.0f;
-        float h = 5.0f + (i % 5) * 2.0f;
-        buildings.push_back({ 9.0f, z + ((i%2)?-2.0f:2.0f), 6.0f, 8.0f, h });
-    }
-}
-
-// Initialize cars and humans
-void initActors() {
-    cars.clear();
-    // lanes: two lanes centered at x = -1.2 and x = +1.2
-    cars.push_back({ -1.2f, -30.0f, 0.02f, 0.9f, 0.1f, 0.1f }); // red
-    cars.push_back({  1.2f, -10.0f, 0.015f, 0.1f, 0.1f, 0.9f }); // blue
-    cars.push_back({ -1.2f,  10.0f, 0.018f, 0.1f, 0.8f, 0.2f }); // green
-    cars.push_back({  1.2f,  30.0f, 0.016f, 0.95f, 0.6f, 0.12f }); // orange
-
-    humans.clear();
-    // create humans walking on sidewalk in front of buildings on both sides
-    for (int i = 0; i < 8; ++i) {
-        float z = -60.0f + i * 15.0f + (rand()%10 - 5) * 0.4f;
-        // left sidewalk (x ~ -6.5)
-        humans.push_back({ -6.5f + (rand()%100)/500.0f, z, 1.0f * ((i%2)?1.0f:-1.0f), 0.01f + (rand()%5)/200.0f, (float) (rand()%100)/100.0f });
-        // right sidewalk
-        humans.push_back({  6.5f + (rand()%100)/500.0f, z + (rand()%10-5), -1.0f * ((i%2)?1.0f:-1.0f), 0.01f + (rand()%5)/200.0f, (float) (rand()%100)/100.0f });
-    }
-}
-
-// -------------------------- Drawing primitives --------------------------
-void drawWindowPanel(int rows, int cols, float b_w, float b_h, float sill_y) {
-    // Draw rows x cols windows on a building face of width b_w and height b_h
-    float pad = 0.12f;
-    float winW = (b_w - (cols+1)*pad) / cols;
-    float winH = (b_h - (rows+1)*pad) / rows;
-
-    for (int r = 0; r < rows; ++r) {
-        for (int c = 0; c < cols; ++c) {
-            float cx = -b_w/2 + pad + (c * (winW + pad)) + winW/2;
-            float cy = sill_y + b_h/2 - pad - (r * (winH + pad)) - winH/2;
-            // window frame
-            glPushMatrix();
-              glTranslatef(cx, cy, 0.501f); // slightly in front
-              glScalef(winW, winH, 1.0f);
-              setMaterialRGB(0.08f, 0.08f, 0.08f, 5.0f); // frame dark
-              glutSolidCube(1.0f);
-              // glass (inner)
-              glTranslatef(0, 0, 0.051f);
-              glScalef(0.85f, 0.85f, 1.0f);
-              // glass color slightly reflective
-              setMaterialRGB(0.6f, 0.75f, 0.9f, 5.0f);
-              GLfloat prevEmission[4];
-              glGetMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, prevEmission);
-              GLfloat emis[4] = {0.02f,0.03f,0.05f,1.0f};
-              glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, emis);
-              glutSolidCube(1.0f);
-              // reset emission
-              glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, prevEmission);
-            glPopMatrix();
-        }
-    }
-}
-
-// Draw building with windows & door.
-// building centered at (bx, bz) with width w, depth d and height h
-void drawBuildingWithDetails(const Building &B) {
-    float bx = B.x;
-    float bz = B.z;
-    float w = B.w;
-    float d = B.d;
-    float h = B.h;
-
-    // main block
-    setMaterialRGB(0.58f, 0.58f, 0.62f, 30.0f);
-    drawBox(bx, h/2.0f, bz, w, h, d);
-
-    // front face windows & door (assume front faces toward road center -> z direction)
-    // We will put windows on the side that faces z=0 (road center).
-    float frontZ = bz - d/2.0f; // front face nearer to road (depending on side)
-    // But to be consistent, we draw windows on the face towards center (determine by sign)
-    bool faceTowardsCenter = (bz > 0.0f) ? (bz - 0.0f > 0) : (bz - 0.0f < 0);
-    // We'll just apply windows on the inward-facing side (toward z=0)
-    if (bz > 0.0f) frontZ = bz - d/2.0f;
-    else frontZ = bz + d/2.0f;
-
-    // Place windows by transforming to that face
-    glPushMatrix();
-      // move to front face plane
-      glTranslatef(bx, h/2.0f, frontZ + ( (bz>0)?0.502f:-0.502f) );
-      // rotate if backside
-      if (bz < 0.0f) glRotatef(180.0f, 0,1,0);
-      float faceW = w * 0.92f;
-      float faceH = h * 0.62f;
-      // Draw many window panels
-      drawWindowPanel( (int) (h/2.2f), 3, faceW, faceH, 0.0f );
-      // door at bottom center
-      glPushMatrix();
-        glTranslatef(0.0f, -h/2.0f + 1.2f, 0.05f);
-        glScalef(0.9f, 1.8f, 0.2f);
-        setMaterialRGB(0.36f, 0.22f, 0.1f, 10.0f); // door brown
-        glutSolidCube(1.0f);
-        // door knob
-        setMaterialRGB(0.9f, 0.82f, 0.2f, 10.0f);
-        glPushMatrix();
-          glTranslatef(0.35f, 0.0f, 0.3f);
-          glutSolidSphere(0.05f, 8,8);
-        glPopMatrix();
-      glPopMatrix();
-    glPopMatrix();
-
-    // small roof detail
-    setMaterialRGB(0.15f, 0.15f, 0.15f, 5.0f);
-    drawBox(bx, h + 0.25f, bz, w*1.02f, 0.4f, d*1.02f);
-}
-
-// Draw trees as cylinder trunk + cone leaves
-void drawTree(float x, float z, float scale=1.0f) {
-    // trunk
-    setMaterialRGB(0.45f, 0.25f, 0.1f, 10.0f);
-    glPushMatrix();
-      glTranslatef(x, 0.8f, z);
-      glRotatef(-90, 1, 0, 0);
-      GLUquadric* q = gluNewQuadric();
-      gluCylinder(q, 0.18f*scale, 0.15f*scale, 1.6f*scale, 8, 1);
-      gluDeleteQuadric(q);
-    glPopMatrix();
-
-    // leaves (three stacked cones)
-    setMaterialRGB(0.1f, 0.5f, 0.12f, 10.0f);
-    for (int i=0;i<3;i++) {
-        glPushMatrix();
-          glTranslatef(x, 1.6f + i*0.7f*scale, z);
-          glRotatef(-90, 1, 0, 0);
-          glutSolidCone(0.9f*scale - 0.2f*i*scale, 1.0f*scale, 12, 4);
-        glPopMatrix();
-    }
-}
-
-// Draw grass patch with some blades
-void drawGrassPatch(float x, float z, float w, float d) {
-    setMaterialRGB(0.12f, 0.6f, 0.18f, 2.0f);
-    glPushMatrix();
-      glTranslatef(x, 0.001f, z);
-      glBegin(GL_QUADS);
-        glNormal3f(0,1,0);
-        glVertex3f(-w/2, 0, -d/2);
-        glVertex3f( w/2, 0, -d/2);
-        glVertex3f( w/2, 0,  d/2);
-        glVertex3f(-w/2, 0,  d/2);
-      glEnd();
-      // some blades (lines)
-      glDisable(GL_LIGHTING);
-      glColor3f(0.08f, 0.5f, 0.12f);
-      glBegin(GL_LINES);
-        for (int i=0;i<30;i++) {
-          float rx = (rand()%1000)/1000.0f * w - w/2;
-          float rz = (rand()%1000)/1000.0f * d - d/2;
-          glVertex3f(rx, 0.0f, rz);
-          glVertex3f(rx*0.95f, 0.14f + (rand()%20)/200.0f, rz*0.95f);
-        }
-      glEnd();
-      glEnable(GL_LIGHTING);
-    glPopMatrix();
-}
-
-// Draw a human (simple stick + box) at given x,z with walking phase
-void drawHuman(const Human &h) {
-    glPushMatrix();
-      glTranslatef(h.x, 0.0f, h.z);
-      // body (small cube)
-      setMaterialRGB(0.8f,0.55f,0.45f, 10.0f);
-      glPushMatrix();
-        glTranslatef(0.0f, 0.9f, 0.0f);
-        glScalef(0.35f, 0.7f, 0.25f);
-        glutSolidCube(1.0f);
-      glPopMatrix();
-      // head
-      setMaterialRGB(0.95f, 0.85f, 0.76f, 10.0f);
-      glPushMatrix();
-        glTranslatef(0.0f, 1.5f, 0.0f);
-        glutSolidSphere(0.18f, 10, 8);
-      glPopMatrix();
-      // legs (two slender boxes) with simple swing using phase
-      float swing = sinf(h.phase*6.28f) * 0.25f;
-      setMaterialRGB(0.15f, 0.15f, 0.18f, 5.0f);
-      glPushMatrix(); // left leg
-        glTranslatef(-0.09f + 0.02f*swing, 0.35f, 0.0f);
-        glScalef(0.12f, 0.7f, 0.12f);
-        glutSolidCube(1.0f);
-      glPopMatrix();
-      glPushMatrix(); // right leg
-        glTranslatef(0.09f - 0.02f*swing, 0.35f, 0.0f);
-        glScalef(0.12f, 0.7f, 0.12f);
-        glutSolidCube(1.0f);
-      glPopMatrix();
-      // arms
-      setMaterialRGB(0.18f, 0.14f, 0.1f, 5.0f);
-      glPushMatrix(); // left arm
-        glTranslatef(-0.28f, 1.05f, 0.0f);
-        glRotatef(swing*30.0f, 1,0,0);
-        glScalef(0.1f, 0.6f, 0.1f);
-        glutSolidCube(1.0f);
-      glPopMatrix();
-      glPushMatrix(); // right arm
-        glTranslatef(0.28f, 1.05f, 0.0f);
-        glRotatef(-swing*30.0f, 1,0,0);
-        glScalef(0.1f, 0.6f, 0.1f);
-        glutSolidCube(1.0f);
-      glPopMatrix();
-    glPopMatrix();
-}
-
-// Draw a simple car body with color
-void drawCarModel(const Car &c) {
-    glPushMatrix();
-      glTranslatef(c.laneX, 0.25f, c.z);
-      setMaterialRGB(c.r, c.g, c.b, 30.0f);
-      glPushMatrix();
-        glScalef(0.9f, 0.4f, 1.6f);
-        glutSolidCube(1.0f);
-      glPopMatrix();
-      // cabin
-      setMaterialRGB(0.85f, 0.95f, 1.0f, 10.0f);
-      glPushMatrix();
-        glTranslatef(0.0f, 0.2f, -0.15f);
-        glScalef(0.6f, 0.35f, 0.8f);
-        glutSolidCube(1.0f);
-      glPopMatrix();
-      // wheels (simple tori)
-      setMaterialRGB(0.02f, 0.02f, 0.02f, 5.0f);
-      for (int i=-1;i<=1;i+=2) {
-        for (int j=-1;j<=1;j+=2) {
-          glPushMatrix();
-            glTranslatef(0.35f*j, -0.05f, 0.6f*i);
-            glRotatef(90, 0,1,0);
-            glutSolidTorus(0.05, 0.09, 8, 10);
-          glPopMatrix();
-        }
-      }
-    glPopMatrix();
-}
-
-// Draw sun (light & sphere) and soft rays shining down (triangles)
-void drawSunAndRays() {
-    // compute sun pos by sunAngle (in degrees) along an arc
-    float rad = sunAngle * M_PI / 180.0f;
-    float sx = SUN_RADIUS * cosf(rad);
-    float sy = SUN_RADIUS * sinf(rad) + 6.0f;
-    float sz = -10.0f;
-
-    // configure light0 as sun
-    GLfloat sunPos[] = { sx, sy, sz, 1.0f };
-    GLfloat sunDiff[] = { 1.0f, 0.95f, 0.85f, 1.0f };
-    GLfloat sunAmb[]  = { 0.25f, 0.22f, 0.18f, 1.0f };
-    glLightfv(GL_LIGHT0, GL_POSITION, sunPos);
-    glLightfv(GL_LIGHT0, GL_DIFFUSE, sunDiff);
-    glLightfv(GL_LIGHT0, GL_AMBIENT, sunAmb);
-
-    // draw sun sphere (emissive)
-    glPushMatrix();
-      glTranslatef(sx, sy, sz);
-      glDisable(GL_LIGHTING);
-      glColor3f(1.0f, 0.95f, 0.6f);
-      glutSolidSphere(1.3f, 24, 20);
-      glEnable(GL_LIGHTING);
-      GLfloat old_em[4];
-      glGetMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, old_em);
-      GLfloat emis[4] = {0.5f,0.45f,0.25f,1.0f};
-      glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, emis);
-      glutSolidSphere(0.9f, 20, 16);
-      glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, old_em);
-    glPopMatrix();
-
-    // soft rays (semi-transparent triangle fans) shining through gaps.
-    glDisable(GL_LIGHTING);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    // create multiple rays pointing down toward road center and gaps
-    for (int side = -1; side <= 1; side += 2) { // left and right sides
-        float baseX = side * 6.5f;
-        for (int g = 0; g < 5; ++g) {
-            float gapZ = -40.0f + g * 20.0f + ((rand()%100)/100.0f)*4.0f;
-            float width = 2.0f + (rand()%100)/100.0f * 1.6f;
-            glColor4f(1.0f, 0.92f, 0.7f, 0.08f);
-            glBegin(GL_TRIANGLES);
-              glVertex3f(sx, sy, sz);
-              glVertex3f(baseX - width, 0.0f, gapZ);
-              glVertex3f(baseX + width, 0.0f, gapZ + 6.0f);
-            glEnd();
-        }
-    }
-
-    glDisable(GL_BLEND);
-    glEnable(GL_LIGHTING);
-}
-
-// Draw the entire scene
-void drawScene() {
-    // Ground (large grass area)
-    setMaterialRGB(0.16f, 0.55f, 0.2f, 2.0f);
-    glBegin(GL_QUADS);
-      glNormal3f(0,1,0);
-      glVertex3f(-200.0f, 0.0f, -200.0f);
-      glVertex3f( 200.0f, 0.0f, -200.0f);
-      glVertex3f( 200.0f, 0.0f,  200.0f);
-      glVertex3f(-200.0f, 0.0f,  200.0f);
-    glEnd();
-
-    // road center (asphalt)
-    setMaterialRGB(0.08f, 0.08f, 0.08f, 5.0f);
-    glBegin(GL_QUADS);
-      glNormal3f(0,1,0);
-      glVertex3f(-3.5f, 0.001f, -120.0f);
-      glVertex3f( 3.5f, 0.001f, -120.0f);
-      glVertex3f( 3.5f, 0.001f,  120.0f);
-      glVertex3f(-3.5f, 0.001f,  120.0f);
-    glEnd();
-
-    // yellow dashed centerline
-    glDisable(GL_LIGHTING);
-    glLineWidth(6.0f);
-    glBegin(GL_LINES);
-      for (float z=-120.0f; z<120.0f; z+=8.0f) {
-        glColor3f(1.0f, 0.9f, 0.0f);
-        glVertex3f(0.0f, 0.002f, z);
-        glVertex3f(0.0f, 0.002f, z+4.0f);
-      }
-    glEnd();
-    glEnable(GL_LIGHTING);
-
-    // sidewalks left and right
-    setMaterialRGB(0.5f,0.5f,0.5f, 2.0f);
-    glBegin(GL_QUADS);
-      glNormal3f(0,1,0);
-      glVertex3f(-7.5f, 0.002f, -120.0f);
-      glVertex3f(-3.5f, 0.002f, -120.0f);
-      glVertex3f(-3.5f, 0.002f, 120.0f);
-      glVertex3f(-7.5f, 0.002f, 120.0f);
-
-      glVertex3f(3.5f, 0.002f, -120.0f);
-      glVertex3f(7.5f, 0.002f, -120.0f);
-      glVertex3f(7.5f, 0.002f, 120.0f);
-      glVertex3f(3.5f, 0.002f, 120.0f);
-    glEnd();
-
-    // small grass strips between sidewalk and buildings
-    drawGrassPatch(-11.0f, 0.0f, 6.0f, 220.0f); // left green strip
-    drawGrassPatch(11.0f, 0.0f, 6.0f, 220.0f);  // right green strip
-
-    // draw buildings
-    for (const Building &b : buildings) {
-        drawBuildingWithDetails(b);
-    }
-
-    // trees near sidewalk
-    for (int i = 0; i < 7; ++i) {
-        float z = -70.0f + i * 24.0f + (i%2?2.0f:-2.0f);
-        drawTree(-12.2f, z, 1.0f);
-        drawTree(12.2f, z+4.0f, 1.0f);
-    }
-
-    // draw cars
-    for (const Car &c : cars) drawCarModel(c);
-
-    // humans on sidewalks
-    for (const Human &h : humans) drawHuman(h);
-}
-
-// -------------------------- OpenGL callbacks --------------------------
-void display() {
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-    // camera transform
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-
-    float radY = camAngleY * M_PI / 180.0f;
-    float radX = camAngleX * M_PI / 180.0f;
-
-    float eyeX = camDist * cosf(radX) * sinf(radY);
-    float eyeY = camDist * sinf(radX);
-    float eyeZ = camDist * cosf(radX) * cosf(radY);
-
-    // look at scene center slightly above ground
-    gluLookAt(eyeX, eyeY, eyeZ,  0.0f, 2.5f, 0.0f,  0.0f, 1.0f, 0.0f);
-
-    // lights & sun
-    drawSunAndRays();
-
-    // draw everything
-    drawScene();
-
-    glutSwapBuffers();
-}
-
-void reshape(int w, int h) {
-    if (h == 0) h = 1;
-    windowWidth = w;
-    windowHeight = h;
-    glViewport(0,0,w,h);
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    gluPerspective(60.0f, (double)w/(double)h, 0.1f, 500.0f);
-    glMatrixMode(GL_MODELVIEW);
-}
-
-// animation update: move cars, humans, and sun
-void update(int value) {
-    // move cars slowly along +Z, wrap around
-    for (auto &c : cars) {
-        c.z += c.speed * 12.0f; // deliberate slow scale
-        if (c.z > 120.0f) c.z = -120.0f;
-    }
-
-    // humans walk along sidewalks back-and-forth
-    for (auto &h : humans) {
-        h.z += h.dir * h.speed * 6.0f;
-        // simple bouncing when reach ends of sidewalk region
-        if (h.z > 110.0f) { h.z = 110.0f; h.dir *= -1.0f; }
-        if (h.z < -110.0f) { h.z = -110.0f; h.dir *= -1.0f; }
-        h.phase += 0.02f + 0.005f * h.speed; // update animation phase
-        if (h.phase > 1000.0f) h.phase -= 1000.0f;
-    }
-
-    // gently move sun (slow)
-    sunAngle += 0.02f;
-    if (sunAngle > 180.0f) sunAngle = 40.0f; // loop back to morning-ish
-
-    glutPostRedisplay();
-    glutTimerFunc(TIMER_MS, update, 0);
-}
-
-// mouse controls for rotation + wheel for zoom
-void mouse(int button, int state, int x, int y) {
-    if (button == GLUT_LEFT_BUTTON) {
-        if (state == GLUT_DOWN) {
-            dragging = true;
-            lastMouseX = x;
-            lastMouseY = y;
-        } else {
-            dragging = false;
-        }
-    }
-
-    // mouse wheel: some GLUT implementations use button 3/4
-    if (button == 3) { // wheel up
-        camDist -= 1.0f;
-        if (camDist < 5.0f) camDist = 5.0f;
-    } else if (button == 4) { // wheel down
-        camDist += 1.0f;
-        if (camDist > 120.0f) camDist = 120.0f;
-    }
-    glutPostRedisplay();
-}
-
-void motion(int x, int y) {
-    if (!dragging) return;
-    int dx = x - lastMouseX;
-    int dy = y - lastMouseY;
-    camAngleY += dx * 0.4f;
-    camAngleX += dy * 0.3f;
-    if (camAngleX > 80.0f) camAngleX = 80.0f;
-    if (camAngleX < -80.0f) camAngleX = -80.0f;
-    lastMouseX = x;
-    lastMouseY = y;
-    glutPostRedisplay();
-}
-
-// simple keyboard for additional control
-void keyboard(unsigned char key, int x, int y) {
-    switch (key) {
-        case 27: exit(0); break;
-        case 'w': camDist -= 1.0f; if (camDist < 5.0f) camDist = 5.0f; break;
-        case 's': camDist += 1.0f; if (camDist > 150.0f) camDist = 150.0f; break;
-        case 'a': camAngleY -= 5.0f; break;
-        case 'd': camAngleY += 5.0f; break;
-        case 'r': camAngleX = -18.0f; camAngleY = 0.0f; camDist=28.0f; break;
-    }
-    glutPostRedisplay();
-}
-
-// -------------------------- Initialization --------------------------
-void initGL() {
-    glEnable(GL_DEPTH_TEST);
-    glShadeModel(GL_SMOOTH);
-    glEnable(GL_NORMALIZE);
-
-    // lighting baseline
-    glEnable(GL_LIGHTING);
-    glEnable(GL_LIGHT0);
-    GLfloat global_amb[] = {0.22f, 0.22f, 0.22f, 1.0f};
-    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, global_amb);
-
-    // nice perspective corrections
-    glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_NICEST);
-
-    // background sky color
-    glClearColor(0.53f, 0.81f, 0.98f, 1.0f);
-
-    // material default
-    GLfloat defA[] = {0.2f,0.2f,0.2f,1.0f};
-    GLfloat defD[] = {0.8f,0.8f,0.8f,1.0f};
-    GLfloat defS[] = {0.1f,0.1f,0.1f,1.0f};
-    glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, defA);
-    glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, defD);
-    glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, defS);
-    glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 10.0f);
-
-    // initialize scene objects
-    setupBuildings();
-    initActors();
-}
-
-// -------------------------- Main --------------------------
-int main(int argc, char** argv) {
-    srand(12345);
-
-    glutInit(&argc, argv);
-    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
-    glutInitWindowSize(windowWidth, windowHeight);
-    glutCreateWindow("Semi-Realistic City - Buildings, Road, Cars, Trees, People, Sun");
-
-    initGL();
-
-    glutDisplayFunc(display);
-    glutReshapeFunc(reshape);
-    glutMouseFunc(mouse);
-    glutMotionFunc(motion);
-    glutKeyboardFunc(keyboard);
-    glutTimerFunc(TIMER_MS, update, 0);
-
-    glutMainLoop();
-    return 0;
-}
-*/
-
-
-/* ********************************************* ******************************** ****************************************/
-
-
-#include <GL/gl.h>
-#include <GL/glu.h>
-#include <GL/glut.h>
-
-#include <vector>
-#include <cmath>
-#include <cstdlib>
+#include <ctime>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -661,12 +35,22 @@ const float SUN_RADIUS = 40.0f;
 // Timer
 const int TIMER_MS = 16;    // ~60 fps
 
+// Weather system
+enum WeatherType { SUNNY, RAINY };
+WeatherType currentWeather = SUNNY;
+float weatherTimer = 0.0f;
+const float WEATHER_CHANGE_TIME = 10.0f; // Change weather every 10 seconds
+float rainIntensity = 0.0f;
+std::vector<std::pair<float, float>> rainDrops; // x, z positions
+
 // -------------------------- Scene objects --------------------------
 struct Car {
     float laneX;   // x position (lane center)
     float z;       // z position
     float speed;   // speed units per frame
     float r,g,b;   // color
+    int carType;   // 0: sedan, 1: SUV, 2: sports car, 3: truck
+    float wheelRotation; // for rotating wheels
 };
 std::vector<Car> cars;
 
@@ -687,14 +71,17 @@ struct Building {
 std::vector<Building> buildings;
 
 // -------------------------- Utility helpers --------------------------
-void setMaterialRGB(float r, float g, float b, float shininess = 20.0f) {
-    GLfloat amb[] = { r*0.2f, g*0.2f, b*0.2f, 1.0f };
-    GLfloat dif[] = { r, g, b, 1.0f };
-    GLfloat spec[] = { 0.2f, 0.2f, 0.2f, 1.0f };
-    glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, amb);
-    glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, dif);
+void setMaterialRGB(float r, float g, float b, float shininess)
+{
+    GLfloat amb[]  = { r * 0.2f, g * 0.2f, b * 0.2f, 1.0f };
+    GLfloat dif[]  = { r, g, b, 1.0f };
+    GLfloat spec[] = { 0.8f, 0.8f, 0.8f, 1.0f };
+    GLfloat shine  = shininess;
+
+    glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT,  amb);
+    glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE,  dif);
     glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, spec);
-    glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, shininess);
+    glMaterialf (GL_FRONT_AND_BACK, GL_SHININESS, shine);
 }
 
 // Simple box (centered) helper using glutSolidCube scaled
@@ -704,6 +91,100 @@ void drawBox(float cx, float cy, float cz, float sx, float sy, float sz) {
     glScalef(sx, sy, sz);
     glutSolidCube(1.0f);
     glPopMatrix();
+}
+
+// -------------------------- Weather system --------------------------
+void initRain() {
+    rainDrops.clear();
+    for (int i = 0; i < 500; i++) { // Create 500 rain drops
+        rainDrops.push_back(std::make_pair(
+            (rand() % 200) - 100.0f,  // x: -100 to 100
+            (rand() % 200) - 100.0f   // z: -100 to 100
+        ));
+    }
+}
+
+void updateWeather(float deltaTime) {
+    weatherTimer += deltaTime;
+
+    if (weatherTimer >= WEATHER_CHANGE_TIME) {
+        weatherTimer = 0.0f;
+
+        if (currentWeather == SUNNY) {
+            currentWeather = RAINY;
+            rainIntensity = 0.0f;
+            initRain();
+        } else {
+            currentWeather = SUNNY;
+            rainIntensity = 0.0f;
+        }
+    }
+
+    // Smooth transition between weather states
+    if (currentWeather == RAINY) {
+        rainIntensity = fmin(rainIntensity + deltaTime * 0.5f, 1.0f);
+    } else {
+        rainIntensity = fmax(rainIntensity - deltaTime * 0.5f, 0.0f);
+    }
+}
+
+void updateRain(float deltaTime) {
+    for (auto& drop : rainDrops) {
+        // Move drops downward
+        drop.second -= deltaTime * 50.0f * rainIntensity; // Move faster with higher intensity
+
+        // Reset drops that fall below ground level
+        if (drop.second < -100.0f) {
+            drop.first = (rand() % 200) - 100.0f;
+            drop.second = 100.0f + (rand() % 50);
+        }
+    }
+}
+
+void drawRain() {
+    if (rainIntensity <= 0.0f) return;
+
+    glDisable(GL_LIGHTING);
+    glColor4f(0.7f, 0.7f, 1.0f, 0.6f * rainIntensity);
+    glLineWidth(1.0f);
+
+    glBegin(GL_LINES);
+    for (const auto& drop : rainDrops) {
+        float y = 20.0f + fmod(drop.second * 0.3f, 5.0f); // Vary height slightly
+        glVertex3f(drop.first, y, drop.second);
+        glVertex3f(drop.first, y - 2.0f, drop.second - 0.5f); // Angled rain
+    }
+    glEnd();
+
+    glEnable(GL_LIGHTING);
+}
+
+void setWeatherLighting(float& sunX, float& sunY, float& sunZ) {
+    if (currentWeather == SUNNY) {
+        // Sunny weather - bright and warm
+        GLfloat sunDiff[] = { 1.0f, 0.88f, 0.55f, 1.0f };
+        GLfloat sunAmb[]  = { 0.28f, 0.23f, 0.15f, 1.0f };
+        GLfloat global_amb[] = {0.22f, 0.22f, 0.22f, 1.0f};
+
+        glLightfv(GL_LIGHT0, GL_DIFFUSE, sunDiff);
+        glLightfv(GL_LIGHT0, GL_AMBIENT, sunAmb);
+        glLightModelfv(GL_LIGHT_MODEL_AMBIENT, global_amb);
+
+        // Set sky color to bright blue
+        glClearColor(0.53f, 0.81f, 0.98f, 1.0f);
+    } else {
+        // Rainy weather - dark and cool
+        GLfloat rainDiff[] = { 0.4f, 0.4f, 0.5f, 1.0f };
+        GLfloat rainAmb[]  = { 0.15f, 0.15f, 0.2f, 1.0f };
+        GLfloat global_amb[] = {0.1f, 0.1f, 0.15f, 1.0f};
+
+        glLightfv(GL_LIGHT0, GL_DIFFUSE, rainDiff);
+        glLightfv(GL_LIGHT0, GL_AMBIENT, rainAmb);
+        glLightModelfv(GL_LIGHT_MODEL_AMBIENT, global_amb);
+
+        // Set sky color to gray
+        glClearColor(0.4f, 0.4f, 0.5f, 1.0f);
+    }
 }
 
 // -------------------------- Scene building/initialization --------------------------
@@ -724,61 +205,99 @@ void setupBuildings() {
     }
 }
 
-// Initialize cars and humans
 void initActors() {
     cars.clear();
-    // lanes: two lanes centered at x = -1.2 and x = +1.2
-    cars.push_back({ -1.2f, -30.0f, 0.02f, 0.9f, 0.1f, 0.1f }); // red
-    cars.push_back({  1.2f, -10.0f, 0.015f, 0.1f, 0.1f, 0.9f }); // blue
-    cars.push_back({ -1.2f,  10.0f, 0.018f, 0.1f, 0.8f, 0.2f }); // green
-    cars.push_back({  1.2f,  30.0f, 0.016f, 0.95f, 0.6f, 0.12f }); // orange
+    // Two lanes:
+    // - Left lane (x = -1.2f): cars moving in +Z direction (forward)
+    // - Right lane (x = 1.2f): cars moving in -Z direction (backward)
+
+    // Left lane cars (moving forward +Z)
+    cars.push_back({ -1.2f, -30.0f, 0.02f, 0.9f, 0.1f, 0.1f, 0, 0.0f }); // red sedan
+    cars.push_back({ -1.2f, -10.0f, 0.018f, 0.1f, 0.8f, 0.2f, 2, 0.0f }); // green sports car
+
+    // Right lane cars (moving backward -Z) - negative speed
+    cars.push_back({  1.2f, 30.0f, -0.015f, 0.1f, 0.1f, 0.9f, 1, 0.0f }); // blue SUV
+    cars.push_back({  1.2f, 10.0f, -0.016f, 0.95f, 0.6f, 0.12f, 3, 0.0f }); // orange truck
 
     humans.clear();
-    // create humans walking on sidewalk in front of buildings on both sides
     for (int i = 0; i < 8; ++i) {
         float z = -60.0f + i * 15.0f + (rand()%10 - 5) * 0.4f;
-        // left sidewalk (x ~ -6.5)
-        humans.push_back({ -6.5f + (rand()%100)/500.0f, z, 1.0f * ((i%2)?1.0f:-1.0f), 0.01f + (rand()%5)/200.0f, (float) (rand()%100)/100.0f });
-        // right sidewalk
-        humans.push_back({  6.5f + (rand()%100)/500.0f, z + (rand()%10-5), -1.0f * ((i%2)?1.0f:-1.0f), 0.01f + (rand()%5)/200.0f, (float) (rand()%100)/100.0f });
+
+        // Left sidewalk humans
+        humans.push_back({
+            -4.8f + (rand()%100)/500.0f,
+            z,
+            1.0f * ((i%2)?1.0f:-1.0f),
+            0.005f + (rand()%3)/300.0f,
+            (float) (rand()%100)/100.0f
+        });
+
+        // Right sidewalk humans
+        humans.push_back({
+            4.8f + (rand()%100)/500.0f,
+            z + (rand()%10-5),
+            -1.0f * ((i%2)?1.0f:-1.0f),
+            0.005f + (rand()%3)/300.0f,
+            (float) (rand()%100)/100.0f
+        });
     }
 }
 
 // -------------------------- Drawing primitives --------------------------
 void drawWindowPanel(int rows, int cols, float b_w, float b_h, float sill_y) {
-    // Draw rows x cols windows on a building face of width b_w and height b_h
-    float pad = 0.12f;
+    float pad = 0.15f;
     float winW = (b_w - (cols+1)*pad) / cols;
     float winH = (b_h - (rows+1)*pad) / rows;
 
     for (int r = 0; r < rows; ++r) {
         for (int c = 0; c < cols; ++c) {
             float cx = -b_w/2 + pad + (c * (winW + pad)) + winW/2;
-            float cy = sill_y + b_h/2 - pad - (r * (winH + pad)) - winH/2;
-            // window frame
+            float cy = sill_y + b_h/2 - pad - (r * (winW + pad)) - winH/2;
+
             glPushMatrix();
-              glTranslatef(cx, cy, 0.501f); // slightly in front
-              glScalef(winW, winH, 1.0f);
-              setMaterialRGB(0.08f, 0.08f, 0.08f, 5.0f); // frame dark
-              glutSolidCube(1.0f);
-              // glass (inner)
-              glTranslatef(0, 0, 0.051f);
-              glScalef(0.85f, 0.85f, 1.0f);
-              // glass color slightly reflective
-              setMaterialRGB(0.6f, 0.75f, 0.9f, 5.0f);
-              GLfloat prevEmission[4];
-              glGetMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, prevEmission);
-              GLfloat emis[4] = {0.02f,0.03f,0.05f,1.0f};
-              glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, emis);
-              glutSolidCube(1.0f);
-              // reset emission
-              glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, prevEmission);
+              glTranslatef(cx, cy, 0.0f);
+
+              // Window frame
+              glPushMatrix();
+                glTranslatef(0, 0, -0.1f);
+                glScalef(winW, winH, 0.15f);
+                setMaterialRGB(0.15f, 0.15f, 0.15f, 5.0f);
+                glutSolidCube(1.0f);
+              glPopMatrix();
+
+              // Glass pane
+              glPushMatrix();
+                glTranslatef(0, 0, 0.02f);
+                glScalef(winW * 0.85f, winH * 0.85f, 0.01f);
+
+                // Adjust glass color based on weather
+                if (currentWeather == SUNNY) {
+                    setMaterialRGB(0.7f, 0.85f, 1.0f, 80.0f);
+                } else {
+                    setMaterialRGB(0.5f, 0.6f, 0.8f, 60.0f); // Darker glass for rainy weather
+                }
+
+                GLfloat prevEmission[4];
+                glGetMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, prevEmission);
+                GLfloat emis[4] = {0.1f, 0.12f, 0.15f, 1.0f};
+                glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, emis);
+                glutSolidCube(1.0f);
+                glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, prevEmission);
+              glPopMatrix();
+
+              // Window sill
+              glPushMatrix();
+                glTranslatef(0, -winH/2 - 0.02f, 0.05f);
+                glScalef(winW * 1.1f, 0.04f, 0.1f);
+                setMaterialRGB(0.3f, 0.3f, 0.3f, 10.0f);
+                glutSolidCube(1.0f);
+              glPopMatrix();
+
             glPopMatrix();
         }
     }
 }
 
-// Draw building with windows & door.
 void drawBuildingWithDetails(const Building &B) {
     float bx = B.x;
     float bz = B.z;
@@ -786,65 +305,99 @@ void drawBuildingWithDetails(const Building &B) {
     float d = B.d;
     float h = B.h;
 
-    // main block
-    setMaterialRGB(0.58f, 0.58f, 0.62f, 30.0f);
+    // Adjust building color based on weather
+    if (currentWeather == SUNNY) {
+        setMaterialRGB(0.58f, 0.58f, 0.62f, 30.0f);
+    } else {
+        setMaterialRGB(0.45f, 0.45f, 0.5f, 20.0f); // Darker, wet look
+    }
     drawBox(bx, h/2.0f, bz, w, h, d);
 
-    // front face windows & door
-    float frontZ = bz - d/2.0f; // front face nearer to road (depending on side)
-    if (bx > 0.0f) frontZ = bz + d/2.0f; // Buildings on the right side face -X/center
+    // Draw windows on all four sides
+    float faceW, faceH;
 
-    // Place windows by transforming to that face
+    // Front face
     glPushMatrix();
-      // move to front face plane
-      glTranslatef(bx, h/2.0f, frontZ + ( (bx>0)?0.502f:-0.502f) );
-      // rotate if backside
-      if (bx < 0.0f) glRotatef(180.0f, 0,1,0); // Buildings on the left side face +X/center
-      float faceW = w * 0.92f;
-      float faceH = h * 0.62f;
-      // Draw many window panels
+      glTranslatef(bx, h/2.0f, bz - d/2.0f);
+      glRotatef(180.0f, 0,1,0);
+      faceW = w * 0.92f;
+      faceH = h * 0.62f;
       drawWindowPanel( (int) (h/2.2f), 3, faceW, faceH, 0.0f );
-      // door at bottom center
+
+      // door
       glPushMatrix();
-        glTranslatef(0.0f, -h/2.0f + 1.2f, 0.05f);
-        glScalef(0.9f, 1.8f, 0.2f);
-        setMaterialRGB(0.36f, 0.22f, 0.1f, 10.0f); // door brown
+        glTranslatef(0.0f, -h/2.0f + 1.2f, 0.1f);
+        glScalef(0.9f, 1.8f, 0.15f);
+        setMaterialRGB(0.36f, 0.22f, 0.1f, 10.0f);
         glutSolidCube(1.0f);
         // door knob
         setMaterialRGB(0.9f, 0.82f, 0.2f, 10.0f);
         glPushMatrix();
-          glTranslatef(0.35f, 0.0f, 0.3f);
+          glTranslatef(0.35f, 0.0f, 0.5f);
           glutSolidSphere(0.05f, 8,8);
         glPopMatrix();
       glPopMatrix();
     glPopMatrix();
 
-    // small roof detail
-    setMaterialRGB(0.15f, 0.15f, 0.15f, 5.0f);
+    // Back face
+    glPushMatrix();
+      glTranslatef(bx, h/2.0f, bz + d/2.0f);
+      faceW = w * 0.92f;
+      faceH = h * 0.62f;
+      drawWindowPanel( (int) (h/2.2f), 3, faceW, faceH, 0.0f );
+    glPopMatrix();
+
+    // Left side face
+    glPushMatrix();
+      glTranslatef(bx - w/2.0f, h/2.0f, bz);
+      glRotatef(-90.0f, 0,1,0);
+      faceW = d * 0.92f;
+      faceH = h * 0.62f;
+      drawWindowPanel( (int) (h/2.2f), 2, faceW, faceH, 0.0f );
+    glPopMatrix();
+
+    // Right side face
+    glPushMatrix();
+      glTranslatef(bx + w/2.0f, h/2.0f, bz);
+      glRotatef(90.0f, 0,1,0);
+      faceW = d * 0.92f;
+      faceH = h * 0.62f;
+      drawWindowPanel( (int) (h/2.2f), 2, faceW, faceH, 0.0f );
+    glPopMatrix();
+
+    // Roof detail - darker when rainy
+    if (currentWeather == SUNNY) {
+        setMaterialRGB(0.15f, 0.15f, 0.15f, 5.0f);
+    } else {
+        setMaterialRGB(0.1f, 0.1f, 0.12f, 3.0f); // Darker, wet roof
+    }
     drawBox(bx, h + 0.25f, bz, w*1.02f, 0.4f, d*1.02f);
 }
 
-// Draw a simple shadow for a building
 void drawBuildingShadow(const Building &B, float sunX, float sunY, float sunZ) {
+    // Don't draw shadows during heavy rain
+    if (currentWeather == RAINY && rainIntensity > 0.7f) return;
+
     glDisable(GL_LIGHTING);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glColor4f(0.0f, 0.0f, 0.0f, 0.3f); // Semi-transparent black/grey shadow
+
+    // Lighter shadows during rainy weather
+    if (currentWeather == SUNNY) {
+        glColor4f(0.0f, 0.0f, 0.0f, 0.3f);
+    } else {
+        glColor4f(0.0f, 0.0f, 0.0f, 0.15f * (1.0f - rainIntensity));
+    }
 
     glPushMatrix();
-      // Translate to the building's base
-      glTranslatef(B.x, 0.005f, B.z); // Slightly above ground to avoid z-fighting
-
-      // Calculate shadow direction vector from sun to building
+      glTranslatef(B.x, 0.005f, B.z);
       float lightDirX = B.x - sunX;
       float lightDirZ = B.z - sunZ;
       float shadowOffsetX = -lightDirX * 0.05f;
       float shadowOffsetZ = -lightDirZ * 0.05f;
 
-      // Draw a flattened quad representing the shadow base
       glBegin(GL_QUADS);
         glNormal3f(0,1,0);
-        // Project corners of the building base onto the ground, offset by sun position
         glVertex3f(-B.w/2 + shadowOffsetX, 0, -B.d/2 + shadowOffsetZ);
         glVertex3f( B.w/2 + shadowOffsetX, 0, -B.d/2 + shadowOffsetZ);
         glVertex3f( B.w/2 + shadowOffsetX, 0,  B.d/2 + shadowOffsetZ);
@@ -856,11 +409,13 @@ void drawBuildingShadow(const Building &B, float sunX, float sunY, float sunZ) {
     glEnable(GL_LIGHTING);
 }
 
-
-// Draw trees as cylinder trunk + cone leaves
 void drawTree(float x, float z, float scale=1.0f) {
     // trunk
-    setMaterialRGB(0.45f, 0.25f, 0.1f, 10.0f);
+    if (currentWeather == SUNNY) {
+        setMaterialRGB(0.45f, 0.25f, 0.1f, 10.0f);
+    } else {
+        setMaterialRGB(0.35f, 0.2f, 0.08f, 8.0f); // Darker, wet trunk
+    }
     glPushMatrix();
       glTranslatef(x, 0.8f, z);
       glRotatef(-90, 1, 0, 0);
@@ -869,8 +424,12 @@ void drawTree(float x, float z, float scale=1.0f) {
       gluDeleteQuadric(q);
     glPopMatrix();
 
-    // leaves (three stacked cones)
-    setMaterialRGB(0.1f, 0.5f, 0.12f, 10.0f);
+    // leaves
+    if (currentWeather == SUNNY) {
+        setMaterialRGB(0.1f, 0.5f, 0.12f, 10.0f);
+    } else {
+        setMaterialRGB(0.08f, 0.4f, 0.1f, 8.0f); // Darker, wet leaves
+    }
     for (int i=0;i<3;i++) {
         glPushMatrix();
           glTranslatef(x, 1.6f + i*0.7f*scale, z);
@@ -880,9 +439,14 @@ void drawTree(float x, float z, float scale=1.0f) {
     }
 }
 
-// Draw grass patch with some blades
 void drawGrassPatch(float x, float z, float w, float d) {
-    setMaterialRGB(0.12f, 0.6f, 0.18f, 2.0f);
+    // Base grass surface - adjust color based on weather
+    if (currentWeather == SUNNY) {
+        setMaterialRGB(0.16f, 0.55f, 0.2f, 2.0f);
+    } else {
+        setMaterialRGB(0.12f, 0.45f, 0.16f, 1.0f); // Darker, wet grass
+    }
+
     glPushMatrix();
       glTranslatef(x, 0.001f, z);
       glBegin(GL_QUADS);
@@ -892,60 +456,102 @@ void drawGrassPatch(float x, float z, float w, float d) {
         glVertex3f( w/2, 0,  d/2);
         glVertex3f(-w/2, 0,  d/2);
       glEnd();
-      // some blades (lines)
-      glDisable(GL_LIGHTING);
-      glColor3f(0.08f, 0.5f, 0.12f);
+    glPopMatrix();
+
+    // Detailed grass blades
+    glDisable(GL_LIGHTING);
+    glPushMatrix();
+      glTranslatef(x, 0.0f, z);
+
+      GLfloat darkGreen[3], mediumGreen[3], lightGreen[3];
+      if (currentWeather == SUNNY) {
+          darkGreen[0]=0.08f; darkGreen[1]=0.45f; darkGreen[2]=0.12f;
+          mediumGreen[0]=0.12f; mediumGreen[1]=0.55f; mediumGreen[2]=0.15f;
+          lightGreen[0]=0.15f; lightGreen[1]=0.65f; lightGreen[2]=0.18f;
+      } else {
+          darkGreen[0]=0.06f; darkGreen[1]=0.35f; darkGreen[2]=0.1f;
+          mediumGreen[0]=0.09f; mediumGreen[1]=0.45f; mediumGreen[2]=0.12f;
+          lightGreen[0]=0.12f; lightGreen[1]=0.55f; lightGreen[2]=0.14f;
+      }
+
+      glLineWidth(1.5f);
       glBegin(GL_LINES);
-        for (int i=0;i<30;i++) {
+        for (int i=0; i < 200; i++) {
           float rx = (rand()%1000)/1000.0f * w - w/2;
           float rz = (rand()%1000)/1000.0f * d - d/2;
+          float height = 0.15f + (rand()%30)/200.0f;
+          float curve = (rand()%100)/500.0f - 0.1f;
+          float leanX = (rand()%100)/300.0f - 0.16f;
+          float leanZ = (rand()%100)/300.0f - 0.16f;
+
+          int shade = rand() % 3;
+          switch(shade) {
+            case 0: glColor3fv(darkGreen); break;
+            case 1: glColor3fv(mediumGreen); break;
+            case 2: glColor3fv(lightGreen); break;
+          }
+
           glVertex3f(rx, 0.0f, rz);
-          glVertex3f(rx*0.95f, 0.14f + (rand()%20)/200.0f, rz*0.95f);
+          glVertex3f(rx + leanX + curve, height, rz + leanZ);
         }
       glEnd();
-      glEnable(GL_LIGHTING);
+
     glPopMatrix();
+    glEnable(GL_LIGHTING);
 }
 
-// Draw a human (simple stick + box) at given x,z with walking phase
 void drawHuman(const Human &h) {
     glPushMatrix();
       glTranslatef(h.x, 0.0f, h.z);
-      // body (small cube)
-      setMaterialRGB(0.8f,0.55f,0.45f, 10.0f);
+
+      // body
+      if (currentWeather == SUNNY) {
+          setMaterialRGB(0.8f,0.55f,0.45f, 10.0f);
+      } else {
+          setMaterialRGB(0.7f,0.5f,0.4f, 8.0f); // Darker skin tone in rain
+      }
+
       glPushMatrix();
         glTranslatef(0.0f, 0.9f, 0.0f);
         glScalef(0.35f, 0.7f, 0.25f);
         glutSolidCube(1.0f);
       glPopMatrix();
+
       // head
-      setMaterialRGB(0.95f, 0.85f, 0.76f, 10.0f);
+      if (currentWeather == SUNNY) {
+          setMaterialRGB(0.95f, 0.85f, 0.76f, 10.0f);
+      } else {
+          setMaterialRGB(0.85f, 0.75f, 0.66f, 8.0f);
+      }
+
       glPushMatrix();
         glTranslatef(0.0f, 1.5f, 0.0f);
         glutSolidSphere(0.18f, 10, 8);
       glPopMatrix();
-      // legs (two slender boxes) with simple swing using phase
-      float swing = sinf(h.phase*6.28f) * 0.25f;
+
+      // legs
       setMaterialRGB(0.15f, 0.15f, 0.18f, 5.0f);
-      glPushMatrix(); // left leg
+      float swing = sinf(h.phase*6.28f) * 0.25f;
+      glPushMatrix();
         glTranslatef(-0.09f + 0.02f*swing, 0.35f, 0.0f);
         glScalef(0.12f, 0.7f, 0.12f);
         glutSolidCube(1.0f);
       glPopMatrix();
-      glPushMatrix(); // right leg
+      glPushMatrix();
         glTranslatef(0.09f - 0.02f*swing, 0.35f, 0.0f);
         glScalef(0.12f, 0.7f, 0.12f);
         glutSolidCube(1.0f);
       glPopMatrix();
+
       // arms
       setMaterialRGB(0.18f, 0.14f, 0.1f, 5.0f);
-      glPushMatrix(); // left arm
+      glPushMatrix();
         glTranslatef(-0.28f, 1.05f, 0.0f);
         glRotatef(swing*30.0f, 1,0,0);
         glScalef(0.1f, 0.6f, 0.1f);
         glutSolidCube(1.0f);
       glPopMatrix();
-      glPushMatrix(); // right arm
+      glPushMatrix();
         glTranslatef(0.28f, 1.05f, 0.0f);
         glRotatef(-swing*30.0f, 1,0,0);
         glScalef(0.1f, 0.6f, 0.1f);
@@ -954,78 +560,202 @@ void drawHuman(const Human &h) {
     glPopMatrix();
 }
 
-// Draw a simple car body with color
-void drawCarModel(const Car &c) {
+// Car drawing functions (sedan, SUV, sports car, truck) remain the same
+void drawSedan(const Car &c) {
     glPushMatrix();
-      glTranslatef(c.laneX, 0.25f, c.z);
+      glTranslatef(c.laneX, 0.3f, c.z);
       setMaterialRGB(c.r, c.g, c.b, 30.0f);
       glPushMatrix();
-        glScalef(0.9f, 0.4f, 1.6f);
+        glScalef(1.0f, 0.45f, 2.2f);
         glutSolidCube(1.0f);
       glPopMatrix();
-      // cabin
       setMaterialRGB(0.85f, 0.95f, 1.0f, 10.0f);
       glPushMatrix();
-        glTranslatef(0.0f, 0.2f, -0.15f);
-        glScalef(0.6f, 0.35f, 0.8f);
+        glTranslatef(0.0f, 0.25f, -0.3f);
+        glScalef(0.7f, 0.4f, 1.0f);
         glutSolidCube(1.0f);
       glPopMatrix();
-      // wheels (simple tori)
+      setMaterialRGB(0.9f, 0.9f, 0.7f, 50.0f);
+      glPushMatrix();
+        glTranslatef(0.4f, 0.1f, 0.9f);
+        glutSolidSphere(0.08f, 8, 8);
+      glPopMatrix();
+      glPushMatrix();
+        glTranslatef(-0.4f, 0.1f, 0.9f);
+        glutSolidSphere(0.08f, 8, 8);
+      glPopMatrix();
       setMaterialRGB(0.02f, 0.02f, 0.02f, 5.0f);
       for (int i=-1;i<=1;i+=2) {
         for (int j=-1;j<=1;j+=2) {
           glPushMatrix();
-            glTranslatef(0.35f*j, -0.05f, 0.6f*i);
+            glTranslatef(0.55f*j, -0.15f, 0.6f*i);
             glRotatef(90, 0,1,0);
-            glutSolidTorus(0.05, 0.09, 8, 10);
+            glRotatef(c.wheelRotation, 0,0,1);
+            glutSolidTorus(0.08, 0.12, 8, 12);
           glPopMatrix();
         }
       }
     glPopMatrix();
 }
 
-// Draw sun (light & sphere) and get its position
+void drawSUV(const Car &c) {
+    glPushMatrix();
+      glTranslatef(c.laneX, 0.4f, c.z);
+      setMaterialRGB(c.r, c.g, c.b, 30.0f);
+      glPushMatrix();
+        glScalef(1.2f, 0.6f, 2.4f);
+        glutSolidCube(1.0f);
+      glPopMatrix();
+      setMaterialRGB(0.85f, 0.95f, 1.0f, 10.0f);
+      glPushMatrix();
+        glTranslatef(0.0f, 0.35f, -0.2f);
+        glScalef(0.9f, 0.5f, 1.2f);
+        glutSolidCube(1.0f);
+      glPopMatrix();
+      setMaterialRGB(0.3f, 0.3f, 0.3f, 10.0f);
+      glPushMatrix();
+        glTranslatef(0.0f, 0.7f, 0.0f);
+        glScalef(0.8f, 0.05f, 1.8f);
+        glutSolidCube(1.0f);
+      glPopMatrix();
+      setMaterialRGB(0.02f, 0.02f, 0.02f, 5.0f);
+      for (int i=-1;i<=1;i+=2) {
+        for (int j=-1;j<=1;j+=2) {
+          glPushMatrix();
+            glTranslatef(0.65f*j, -0.2f, 0.7f*i);
+            glRotatef(90, 0,1,0);
+            glRotatef(c.wheelRotation, 0,0,1);
+            glutSolidTorus(0.1, 0.15, 8, 12);
+          glPopMatrix();
+        }
+      }
+    glPopMatrix();
+}
+
+void drawSportsCar(const Car &c) {
+    glPushMatrix();
+      glTranslatef(c.laneX, 0.25f, c.z);
+      setMaterialRGB(c.r, c.g, c.b, 60.0f);
+      glPushMatrix();
+        glScalef(0.9f, 0.3f, 1.8f);
+        glutSolidCube(1.0f);
+      glPopMatrix();
+      setMaterialRGB(0.2f, 0.2f, 0.2f, 40.0f);
+      glPushMatrix();
+        glTranslatef(0.0f, 0.2f, -0.2f);
+        glScalef(0.7f, 0.25f, 0.9f);
+        glutSolidCube(1.0f);
+      glPopMatrix();
+      setMaterialRGB(c.r*0.7f, c.g*0.7f, c.b*0.7f, 30.0f);
+      glPushMatrix();
+        glTranslatef(0.0f, 0.4f, -0.8f);
+        glScalef(0.6f, 0.05f, 0.2f);
+        glutSolidCube(1.0f);
+      glPopMatrix();
+      setMaterialRGB(0.02f, 0.02f, 0.02f, 5.0f);
+      for (int i=-1;i<=1;i+=2) {
+        for (int j=-1;j<=1;j+=2) {
+          glPushMatrix();
+            glTranslatef(0.5f*j, -0.1f, 0.5f*i);
+            glRotatef(90, 0,1,0);
+            glRotatef(c.wheelRotation, 0,0,1);
+            glutSolidTorus(0.06, 0.1, 8, 12);
+          glPopMatrix();
+        }
+      }
+    glPopMatrix();
+}
+
+void drawTruck(const Car &c) {
+    glPushMatrix();
+      glTranslatef(c.laneX, 0.5f, c.z);
+      setMaterialRGB(c.r, c.g, c.b, 30.0f);
+      glPushMatrix();
+        glTranslatef(0.0f, 0.3f, -0.8f);
+        glScalef(1.0f, 0.8f, 1.0f);
+        glutSolidCube(1.0f);
+      glPopMatrix();
+      setMaterialRGB(c.r*0.8f, c.g*0.8f, c.b*0.8f, 30.0f);
+      glPushMatrix();
+        glTranslatef(0.0f, 0.4f, 0.8f);
+        glScalef(1.4f, 0.9f, 2.0f);
+        glutSolidCube(1.0f);
+      glPopMatrix();
+      setMaterialRGB(0.02f, 0.02f, 0.02f, 5.0f);
+      float wheelPositions[] = {-0.7f, 0.7f, -1.5f, 1.5f};
+      for (int i=0; i<4; i++) {
+        for (int j=-1;j<=1;j+=2) {
+          glPushMatrix();
+            glTranslatef(wheelPositions[i]*j, -0.3f, -0.5f);
+            glRotatef(90, 0,1,0);
+            glRotatef(c.wheelRotation, 0,0,1);
+            glutSolidTorus(0.12, 0.18, 8, 12);
+          glPopMatrix();
+        }
+      }
+      for (int j=-1;j<=1;j+=2) {
+        glPushMatrix();
+          glTranslatef(wheelPositions[3]*j, -0.3f, 1.2f);
+          glRotatef(90, 0,1,0);
+          glRotatef(c.wheelRotation, 0,0,1);
+          glutSolidTorus(0.12, 0.18, 8, 12);
+        glPopMatrix();
+      }
+    glPopMatrix();
+}
+
+void drawCarModel(const Car &c) {
+    switch(c.carType) {
+        case 0: drawSedan(c); break;
+        case 1: drawSUV(c); break;
+        case 2: drawSportsCar(c); break;
+        case 3: drawTruck(c); break;
+        default: drawSedan(c); break;
+    }
+}
+
 void drawSunAndRays(float& sunX_out, float& sunY_out, float& sunZ_out) {
-    // compute sun pos by sunAngle (in degrees) along an arc
     float rad = sunAngle * M_PI / 180.0f;
     float sx = SUN_RADIUS * cosf(rad);
     float sy = SUN_RADIUS * sinf(rad) + 6.0f;
     float sz = -10.0f;
 
-    // Output sun position for shadow calculations
     sunX_out = sx;
     sunY_out = sy;
     sunZ_out = sz;
 
-    // configure light0 as sun (Light Golden Color)
     GLfloat sunPos[] = { sx, sy, sz, 1.0f };
-    // Light golden color
-    GLfloat sunDiff[] = { 1.0f, 0.88f, 0.55f, 1.0f };
-    GLfloat sunAmb[]  = { 0.28f, 0.23f, 0.15f, 1.0f };
     glLightfv(GL_LIGHT0, GL_POSITION, sunPos);
-    glLightfv(GL_LIGHT0, GL_DIFFUSE, sunDiff);
-    glLightfv(GL_LIGHT0, GL_AMBIENT, sunAmb);
 
-    // draw sun sphere (emissive)
-    glPushMatrix();
-      glTranslatef(sx, sy, sz);
-      glDisable(GL_LIGHTING);
-      glColor3f(1.0f, 0.9f, 0.5f); // Golden color for solid sphere
-      glutSolidSphere(1.3f, 24, 20);
-      glEnable(GL_LIGHTING);
-      GLfloat old_em[4];
-      glGetMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, old_em);
-      GLfloat emis[4] = {0.6f,0.5f,0.3f,1.0f}; // Brighter golden emission
-      glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, emis);
-      glutSolidSphere(0.9f, 20, 16);
-      glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, old_em);
-    glPopMatrix();
+    // Set weather-based lighting
+    setWeatherLighting(sx, sy, sz);
+
+    // Draw sun (only visible during sunny weather)
+    if (currentWeather == SUNNY || rainIntensity < 0.5f) {
+        glPushMatrix();
+          glTranslatef(sx, sy, sz);
+          glDisable(GL_LIGHTING);
+          glColor3f(1.0f, 0.9f, 0.5f);
+          glutSolidSphere(1.3f, 24, 20);
+          glEnable(GL_LIGHTING);
+          GLfloat old_em[4];
+          glGetMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, old_em);
+          GLfloat emis[4] = {0.6f,0.5f,0.3f,1.0f};
+          glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, emis);
+          glutSolidSphere(0.9f, 20, 16);
+          glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, old_em);
+        glPopMatrix();
+    }
 }
 
-// Draw the entire scene
 void drawScene(float currentSunX, float currentSunY, float currentSunZ) {
-    // Ground (large grass area)
-    setMaterialRGB(0.16f, 0.55f, 0.2f, 2.0f);
+    // Ground
+    if (currentWeather == SUNNY) {
+        setMaterialRGB(0.16f, 0.55f, 0.2f, 2.0f);
+    } else {
+        setMaterialRGB(0.12f, 0.45f, 0.16f, 1.0f);
+    }
+
     glBegin(GL_QUADS);
       glNormal3f(0,1,0);
       glVertex3f(-200.0f, 0.0f, -200.0f);
@@ -1034,8 +764,13 @@ void drawScene(float currentSunX, float currentSunY, float currentSunZ) {
       glVertex3f(-200.0f, 0.0f,  200.0f);
     glEnd();
 
-    // road center (asphalt)
-    setMaterialRGB(0.08f, 0.08f, 0.08f, 5.0f);
+    // Road - darker when wet
+    if (currentWeather == SUNNY) {
+        setMaterialRGB(0.08f, 0.08f, 0.08f, 5.0f);
+    } else {
+        setMaterialRGB(0.05f, 0.05f, 0.06f, 3.0f);
+    }
+
     glBegin(GL_QUADS);
       glNormal3f(0,1,0);
       glVertex3f(-3.5f, 0.001f, -120.0f);
@@ -1044,92 +779,108 @@ void drawScene(float currentSunX, float currentSunY, float currentSunZ) {
       glVertex3f(-3.5f, 0.001f,  120.0f);
     glEnd();
 
-    // yellow dashed centerline
+    // Road markings
     glDisable(GL_LIGHTING);
-    glLineWidth(6.0f);
+    glLineWidth(3.0f);
+    glColor3f(1.0f, 0.9f, 0.0f);
     glBegin(GL_LINES);
       for (float z=-120.0f; z<120.0f; z+=8.0f) {
-        glColor3f(1.0f, 0.9f, 0.0f);
         glVertex3f(0.0f, 0.002f, z);
         glVertex3f(0.0f, 0.002f, z+4.0f);
       }
     glEnd();
+    glColor3f(1.0f, 1.0f, 1.0f);
+    glBegin(GL_LINES);
+      for (float z=-120.0f; z<120.0f; z+=15.0f) {
+        glVertex3f(-0.6f, 0.002f, z);
+        glVertex3f(-0.6f, 0.002f, z+7.0f);
+      }
+      for (float z=-120.0f; z<120.0f; z+=15.0f) {
+        glVertex3f(0.6f, 0.002f, z);
+        glVertex3f(0.6f, 0.002f, z+7.0f);
+      }
+    glEnd();
     glEnable(GL_LIGHTING);
 
-    // sidewalks left and right
-    setMaterialRGB(0.5f,0.5f,0.5f, 2.0f);
+    // Sidewalks
+    if (currentWeather == SUNNY) {
+        setMaterialRGB(0.5f,0.5f,0.5f, 2.0f);
+    } else {
+        setMaterialRGB(0.4f,0.4f,0.45f, 1.0f);
+    }
+
     glBegin(GL_QUADS);
       glNormal3f(0,1,0);
       glVertex3f(-7.5f, 0.002f, -120.0f);
       glVertex3f(-3.5f, 0.002f, -120.0f);
       glVertex3f(-3.5f, 0.002f, 120.0f);
       glVertex3f(-7.5f, 0.002f, 120.0f);
-
       glVertex3f(3.5f, 0.002f, -120.0f);
       glVertex3f(7.5f, 0.002f, -120.0f);
       glVertex3f(7.5f, 0.002f, 120.0f);
       glVertex3f(3.5f, 0.002f, 120.0f);
     glEnd();
 
-    // small grass strips between sidewalk and buildings
-    drawGrassPatch(-11.0f, 0.0f, 6.0f, 220.0f); // left green strip
-    drawGrassPatch(11.0f, 0.0f, 6.0f, 220.0f);  // right green strip
+    // Grass strips
+    drawGrassPatch(-11.0f, 0.0f, 6.0f, 220.0f);
+    drawGrassPatch(11.0f, 0.0f, 6.0f, 220.0f);
 
-    // Draw building shadows first
+    // Draw building shadows
     for (const Building &b : buildings) {
         drawBuildingShadow(b, currentSunX, currentSunY, currentSunZ);
     }
 
-    // then draw buildings
+    // Draw buildings
     for (const Building &b : buildings) {
         drawBuildingWithDetails(b);
     }
 
-    // trees near sidewalk
-    for (int i = 0; i < 7; ++i) {
-        float z = -70.0f + i * 24.0f + (i%2?2.0f:-2.0f);
-        drawTree(-12.2f, z, 1.0f);
-        drawTree(12.2f, z+4.0f, 1.0f);
+    // Draw trees
+    float leftTreePositions[] = {-16.5f, -15.0f, -17.0f, -14.5f, -16.0f, -15.5f, -17.5f, -14.0f, -16.8f, -15.2f};
+    float leftTreeZPositions[] = {-85.0f, -65.0f, -45.0f, -25.0f, -5.0f, 15.0f, 35.0f, 55.0f, 75.0f, 95.0f};
+    for (int i = 0; i < 10; ++i) {
+        drawTree(leftTreePositions[i], leftTreeZPositions[i], 0.9f + (i % 3) * 0.1f);
+    }
+    float rightTreePositions[] = {16.5f, 15.0f, 17.0f, 14.5f, 16.0f, 15.5f, 17.5f, 14.0f, 16.8f, 15.2f};
+    float rightTreeZPositions[] = {-80.0f, -60.0f, -40.0f, -20.0f, 0.0f, 20.0f, 40.0f, 60.0f, 80.0f, 100.0f};
+    for (int i = 0; i < 10; ++i) {
+        drawTree(rightTreePositions[i], rightTreeZPositions[i], 0.95f + (i % 3) * 0.1f);
+    }
+    for (int i = 0; i < 6; ++i) {
+        drawTree(-28.0f + (i % 3) * 2.0f, -90.0f + i * 35.0f, 1.2f);
+        drawTree(28.0f - (i % 3) * 2.0f, -85.0f + i * 33.0f, 1.2f);
     }
 
-    // draw cars
+    // Draw cars
     for (const Car &c : cars) drawCarModel(c);
 
-    // humans on sidewalks
+    // Draw humans
     for (const Human &h : humans) drawHuman(h);
+
+    // Draw rain
+    drawRain();
 }
 
 // -------------------------- OpenGL callbacks --------------------------
 void display() {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    // camera transform
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 
-    // 1. Calculate the rotation angles in radians
     float radY = camAngleY * M_PI / 180.0f;
     float radX = camAngleX * M_PI / 180.0f;
-
-    // 2. Calculate the camera eye position relative to the target (orbit)
     float relX = camDist * cosf(radX) * sinf(radY);
     float relY = camDist * sinf(radX);
     float relZ = camDist * cosf(radX) * cosf(radY);
-
-    // 3. Calculate the absolute eye position
     float eyeX = targetX + relX;
     float eyeY = targetY + relY;
     float eyeZ = targetZ + relZ;
-
-    // 4. Look at the target point
     gluLookAt(eyeX, eyeY, eyeZ,  targetX, targetY, targetZ,  0.0f, 1.0f, 0.0f);
 
-    // lights & sun
-    float sunX, sunY, sunZ; // These will get the sun's position
+    float sunX, sunY, sunZ;
     drawSunAndRays(sunX, sunY, sunZ);
-
-    // draw everything
-    drawScene(sunX, sunY, sunZ); // Pass sun position to drawScene for shadows
+    drawScene(sunX, sunY, sunZ);
 
     glutSwapBuffers();
 }
@@ -1145,33 +896,45 @@ void reshape(int w, int h) {
     glMatrixMode(GL_MODELVIEW);
 }
 
-// animation update: move cars, humans, and sun
 void update(int value) {
-    // move cars slowly along +Z, wrap around
-    for (auto &c : cars) {
-        c.z += c.speed * 12.0f; // deliberate slow scale
-        if (c.z > 120.0f) c.z = -120.0f;
+    float deltaTime = TIMER_MS / 1000.0f;
+
+    // Update weather system
+    updateWeather(deltaTime);
+    if (currentWeather == RAINY) {
+        updateRain(deltaTime);
     }
 
-    // humans walk along sidewalks back-and-forth
+    // Move cars
+    for (auto &c : cars) {
+        c.z += c.speed * 12.0f;
+        c.wheelRotation += c.speed * 300.0f;
+        if (c.speed > 0) {
+            if (c.z > 120.0f) c.z = -120.0f;
+        } else {
+            if (c.z < -120.0f) c.z = 120.0f;
+        }
+        if (c.wheelRotation > 360.0f) c.wheelRotation -= 360.0f;
+        if (c.wheelRotation < -360.0f) c.wheelRotation += 360.0f;
+    }
+
+    // Move humans
     for (auto &h : humans) {
         h.z += h.dir * h.speed * 6.0f;
-        // simple bouncing when reach ends of sidewalk region
         if (h.z > 110.0f) { h.z = 110.0f; h.dir *= -1.0f; }
         if (h.z < -110.0f) { h.z = -110.0f; h.dir *= -1.0f; }
-        h.phase += 0.02f + 0.005f * h.speed; // update animation phase
+        h.phase += 0.02f + 0.005f * h.speed;
         if (h.phase > 1000.0f) h.phase -= 1000.0f;
     }
 
-    // gently move sun (slow)
+    // Move sun
     sunAngle += 0.02f;
-    if (sunAngle > 180.0f) sunAngle = 40.0f; // loop back to morning-ish
+    if (sunAngle > 180.0f) sunAngle = 40.0f;
 
     glutPostRedisplay();
     glutTimerFunc(TIMER_MS, update, 0);
 }
 
-// mouse controls for rotation + wheel for zoom
 void mouse(int button, int state, int x, int y) {
     if (button == GLUT_LEFT_BUTTON) {
         if (state == GLUT_DOWN) {
@@ -1182,12 +945,10 @@ void mouse(int button, int state, int x, int y) {
             dragging = false;
         }
     }
-
-    // mouse wheel: zoom in/out
-    if (button == 3) { // wheel up (zoom in)
+    if (button == 3) {
         camDist -= 1.0f;
         if (camDist < 5.0f) camDist = 5.0f;
-    } else if (button == 4) { // wheel down (zoom out)
+    } else if (button == 4) {
         camDist += 1.0f;
         if (camDist > 120.0f) camDist = 120.0f;
     }
@@ -1207,39 +968,27 @@ void motion(int x, int y) {
     glutPostRedisplay();
 }
 
-// Special keyboard function for directional movement (Arrow Keys)
 void specialKeyboard(int key, int x, int y) {
     float radY = camAngleY * M_PI / 180.0f;
-
-    // Calculate forward/backward direction vector components (X and Z)
-    // The negative sign is because the camera orbits a target. To move the
-    // target in the direction the camera is looking, we need to move it in
-    // the opposite direction of the orbit vector components.
     float forwardX = -sinf(radY) * MOVEMENT_SPEED;
     float forwardZ = -cosf(radY) * MOVEMENT_SPEED;
-
-    // Strafe (perpendicular) direction vector components (X and Z)
     float strafeX = cosf(radY) * MOVEMENT_SPEED;
     float strafeZ = -sinf(radY) * MOVEMENT_SPEED;
 
     switch (key) {
         case GLUT_KEY_UP:
-            // Forward movement: move the target along the view vector
             targetX += forwardX;
             targetZ += forwardZ;
             break;
         case GLUT_KEY_DOWN:
-            // Backward movement
             targetX -= forwardX;
             targetZ -= forwardZ;
             break;
         case GLUT_KEY_LEFT:
-            // Strafe Left
             targetX -= strafeX;
             targetZ -= strafeZ;
             break;
         case GLUT_KEY_RIGHT:
-            // Strafe Right
             targetX += strafeX;
             targetZ += strafeZ;
             break;
@@ -1247,41 +996,45 @@ void specialKeyboard(int key, int x, int y) {
     glutPostRedisplay();
 }
 
-// simple keyboard for additional control (ASCII keys)
 void keyboard(unsigned char key, int x, int y) {
     switch (key) {
         case 27: exit(0); break;
-        case 'w': camDist -= 1.0f; if (camDist < 5.0f) camDist = 5.0f; break; // Zoom In
-        case 's': camDist += 1.0f; if (camDist > 150.0f) camDist = 150.0f; break; // Zoom Out
-        case 'a': camAngleY -= 5.0f; break; // Rotate Left
-        case 'd': camAngleY += 5.0f; break; // Rotate Right
-        case 'r': // Reset view
+        case 'w': camDist -= 1.0f; if (camDist < 5.0f) camDist = 5.0f; break;
+        case 's': camDist += 1.0f; if (camDist > 150.0f) camDist = 150.0f; break;
+        case 'a': camAngleY -= 5.0f; break;
+        case 'd': camAngleY += 5.0f; break;
+        case 'r':
             camAngleX = -18.0f; camAngleY = 0.0f; camDist=28.0f;
             targetX = 0.0f; targetY = 2.5f; targetZ = 0.0f;
+            break;
+        case ' ': // Space bar to manually toggle weather
+            if (currentWeather == SUNNY) {
+                currentWeather = RAINY;
+                rainIntensity = 0.0f;
+                initRain();
+            } else {
+                currentWeather = SUNNY;
+                rainIntensity = 0.0f;
+            }
+            weatherTimer = 0.0f;
             break;
     }
     glutPostRedisplay();
 }
 
-// -------------------------- Initialization --------------------------
 void initGL() {
     glEnable(GL_DEPTH_TEST);
     glShadeModel(GL_SMOOTH);
     glEnable(GL_NORMALIZE);
-
-    // lighting baseline
     glEnable(GL_LIGHTING);
     glEnable(GL_LIGHT0);
+
     GLfloat global_amb[] = {0.22f, 0.22f, 0.22f, 1.0f};
     glLightModelfv(GL_LIGHT_MODEL_AMBIENT, global_amb);
-
-    // nice perspective corrections
     glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_NICEST);
 
-    // background sky color
     glClearColor(0.53f, 0.81f, 0.98f, 1.0f);
 
-    // material default setup...
     GLfloat defA[] = {0.2f,0.2f,0.2f,1.0f};
     GLfloat defD[] = {0.8f,0.8f,0.8f,1.0f};
     GLfloat defS[] = {0.1f,0.1f,0.1f,1.0f};
@@ -1290,19 +1043,18 @@ void initGL() {
     glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, defS);
     glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 10.0f);
 
-    // initialize scene objects
     setupBuildings();
     initActors();
+    initRain(); // Initialize rain system
 }
 
-// -------------------------- Main --------------------------
 int main(int argc, char** argv) {
-    srand(12345);
+    srand(time(0)); // Use time-based seed for better randomness
 
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
     glutInitWindowSize(windowWidth, windowHeight);
-    glutCreateWindow("Semi-Realistic City - Directional Camera Control Added (Arrow Keys)");
+    glutCreateWindow("Semi-Realistic City with Dynamic Weather");
 
     initGL();
 
@@ -1311,11 +1063,9 @@ int main(int argc, char** argv) {
     glutMouseFunc(mouse);
     glutMotionFunc(motion);
     glutKeyboardFunc(keyboard);
-    // Register the special keyboard function for non-ASCII keys (like arrow keys)
     glutSpecialFunc(specialKeyboard);
     glutTimerFunc(TIMER_MS, update, 0);
 
     glutMainLoop();
     return 0;
 }
-
